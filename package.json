@@ -8,9 +8,9 @@
     "docs-fetch-mcp": "build/index.js"
   },
   "scripts": {
-    "build": "tsc && chmod +x build/index.js",
+    "build": "npx tsc && chmod +x build/index.js",
     "start": "node build/index.js",
-    "dev": "tsx src/index.ts"
+    "dev": "npx tsx src/index.ts"
   },
   "keywords": [
     "mcp",
