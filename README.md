@@ -20,6 +20,9 @@ This tool is particularly useful when users want an LLM to learn about a specifi
 - **Recursive Exploration**: Follows links to related content within the same domain, up to a specified depth
 - **Parallel Processing**: Efficiently crawls content with concurrent requests and proper error handling
 - **Robust Error Handling**: Gracefully handles network issues, timeouts, and malformed pages
+- **Dual-Strategy Approach**: Uses fast axios requests first with puppeteer as a fallback for more complex pages
+- **Timeout Prevention**: Implements global timeout handling to ensure reliable operation within MCP time limits
+- **Partial Results**: Returns available content even when some pages fail to load completely
 
 ## Usage
 
@@ -61,7 +64,7 @@ Fetches web page content with the ability to explore linked pages up to a specif
 
 1. Clone this repository:
 ```bash
-git clone https://github.com/yourusername/docs-fetch-mcp.git
+git clone https://github.com/wolfyy970/docs-fetch-mcp.git
 cd docs-fetch-mcp
 ```
 
