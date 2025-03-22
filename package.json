@@ -1,0 +1,37 @@
+{
+  "name": "docs-fetch-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for fetching web page content with recursive exploration capability",
+  "type": "module",
+  "main": "build/index.js",
+  "bin": {
+    "docs-fetch-mcp": "build/index.js"
+  },
+  "scripts": {
+    "build": "tsc && chmod +x build/index.js",
+    "start": "node build/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "keywords": [
+    "mcp",
+    "llm",
+    "claude",
+    "documentation",
+    "web-crawler"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^0.1.0",
+    "axios": "^1.6.2",
+    "puppeteer": "^21.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.5",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
