@@ -20,7 +20,7 @@ export class ContentExtractor {
    */
   async hasContent(page: Page): Promise<boolean> {
     return await page.evaluate(() => {
-      return document.body && document.body.textContent && document.body.textContent.trim().length > 100;
+      return Boolean(document.body && document.body.textContent && document.body.textContent.trim().length > 100);
     });
   }
 
@@ -29,6 +29,14 @@ export class ContentExtractor {
    */
   async extractContent(page: Page): Promise<ExtractedContent> {
     const content = await page.evaluate((selectors) => {
+      // Helper function to clean text inside the evaluate context
+      function cleanText(text: string): string {
+        return text
+          .replace(/\s+/g, ' ')
+          .replace(/\n\s*\n/g, '\n\n')
+          .trim();
+      }
+      
       // Try all selectors until we find content
       let mainElement = null;
       for (const selector of selectors) {
@@ -49,7 +57,7 @@ export class ContentExtractor {
       mainElement = mainElement || document.body;
 
       // Extract the main content text
-      const mainContent = mainElement ? this.cleanText(mainElement.textContent || '') : '';
+      const mainContent = mainElement ? cleanText(mainElement.textContent || '') : '';
 
       // Extract links with relevance score
       const relatedLinks = Array.from(document.querySelectorAll('a[href]'))

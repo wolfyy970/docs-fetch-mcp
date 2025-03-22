@@ -6,33 +6,21 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
-
-import { BrowserManager } from './browser/browser-manager.js';
-import { ContentExtractor } from './content/content-extractor.js';
-import { ExtractedContent } from './types/index.js';
-
-interface WebPageContent {
-  url: string;
-  title?: string;
-  content: string;
-  links: Array<{
-    url: string;
-    text: string;
-  }>;
-}
+import puppeteer from 'puppeteer';
+import axios from 'axios';
 
 /**
- * MCP server for fetching and recursively exploring web content.
+ * Simplified MCP server for fetching web content.
  * 
- * This server provides a tool to fetch web page content and explore linked
- * pages up to a specified depth, enabling LLMs to learn about topics by
- * autonomously navigating through related content.
+ * This server provides a streamlined implementation that focuses on reliability
+ * and avoids timeout issues. It fetches web page content and can explore linked
+ * pages up to a specified depth.
  */
 export class DocsFetchServer {
   private server: Server;
-  private browserManager: BrowserManager;
-  private contentExtractor: ContentExtractor;
   private visitedUrls: Set<string> = new Set();
+  private globalTimeout: NodeJS.Timeout | null = null;
+  private timeoutDuration = 45000; // 45 seconds - below MCP's 60s timeout
 
   constructor() {
     this.server = new Server(
@@ -47,10 +35,6 @@ export class DocsFetchServer {
       }
     );
 
-    // Initialize components
-    this.browserManager = new BrowserManager();
-    this.contentExtractor = new ContentExtractor();
-
     this.setupTools();
     this.setupErrorHandling();
   }
@@ -58,7 +42,9 @@ export class DocsFetchServer {
   private setupErrorHandling(): void {
     this.server.onerror = (error) => console.error('[MCP Error]', error);
     process.on('SIGINT', async () => {
-      await this.browserManager.close();
+      if (this.globalTimeout) {
+        clearTimeout(this.globalTimeout);
+      }
       await this.server.close();
       process.exit(0);
     });
@@ -91,11 +77,6 @@ export class DocsFetchServer {
     }));
 
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      console.error('Received tool request:', {
-        tool: request.params.name,
-        arguments: request.params.arguments
-      });
-      
       if (request.params.name === 'fetch_doc_content') {
         const { url, depth = 1 } = request.params.arguments as { 
           url: string;
@@ -105,28 +86,52 @@ export class DocsFetchServer {
         // Reset visited URLs for each new request
         this.visitedUrls.clear();
         
+        // Setup global timeout
+        let timeoutError: Error | null = null;
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          this.globalTimeout = setTimeout(() => {
+            timeoutError = new Error('Operation timed out');
+            reject(timeoutError);
+          }, this.timeoutDuration);
+        });
+        
         try {
-          const result = await this.fetchDocContentRecursive(url, depth);
+          // Race the content fetch against our timeout
+          const result = await Promise.race([
+            this.fetchContent(url, depth),
+            timeoutPromise
+          ]);
           
-          // Format results for better LLM consumption
-          const formattedOutput = {
-            rootUrl: url,
-            explorationDepth: depth,
-            pagesExplored: result.length,
-            content: result
-          };
+          // Clear timeout if we didn't hit it
+          if (this.globalTimeout) {
+            clearTimeout(this.globalTimeout);
+            this.globalTimeout = null;
+          }
           
           return {
             content: [
               {
                 type: 'text',
-                text: JSON.stringify(formattedOutput, null, 2),
+                text: JSON.stringify(result, null, 2),
               },
             ],
           };
         } catch (error: unknown) {
-          console.error('Error in fetch_doc_content:', error);
-          const errorMessage = error instanceof Error ? error.message : String(error);
+          // Clear timeout if we hit an error
+          if (this.globalTimeout) {
+            clearTimeout(this.globalTimeout);
+            this.globalTimeout = null;
+          }
+          
+          let errorMessage = "Unknown error occurred";
+          if (error === timeoutError) {
+            errorMessage = "Operation timed out before completion";
+          } else if (error instanceof Error) {
+            errorMessage = error.message;
+          } else if (typeof error === 'string') {
+            errorMessage = error;
+          }
+          
           return {
             content: [
               {
@@ -147,137 +152,195 @@ export class DocsFetchServer {
   }
 
   /**
-   * Recursively fetch content from a URL and its linked pages up to maxDepth
+   * Main content fetching function with simplified implementation
    */
-  private async fetchDocContentRecursive(
-    url: string, 
-    maxDepth: number, 
-    currentDepth: number = 0
-  ): Promise<WebPageContent[]> {
-    if (currentDepth >= maxDepth || this.visitedUrls.has(url)) {
-      return [];
-    }
-
+  private async fetchContent(url: string, maxDepth: number): Promise<any> {
+    // Track visited URLs to avoid cycles
     this.visitedUrls.add(url);
-    console.error(`Fetching ${url} (depth ${currentDepth}/${maxDepth})`);
-
+    
     try {
-      const content = await this.fetchSinglePage(url);
-      
-      // Filter and sort links by relevance to make exploration more efficient
-      const sortedLinks = content.relatedLinks
-        .filter(link => {
-          // Skip navigation and utility links that are less likely to contain topical content
-          const text = link.text.toLowerCase();
-          return !text.match(/^(home|contact|about|login|sign up|register|search|privacy|terms|cookies)$/i);
-        })
-        .sort((a, b) => b.relevance - a.relevance)
-        .slice(0, 10) // Limit to the most relevant links to avoid excessive exploration
-        .map(link => ({ 
-          url: link.url, 
-          text: link.text 
-        }));
-
-      // Extract page title from URL if not available
-      let pageTitle = "";
+      // First try a simple fetch with axios as a faster alternative
       try {
-        const urlObj = new URL(url);
-        const pathSegments = urlObj.pathname.split('/').filter(Boolean);
-        if (pathSegments.length > 0) {
-          const lastSegment = pathSegments[pathSegments.length - 1];
-          pageTitle = lastSegment
-            .replace(/[_-]/g, ' ')
-            .replace(/\.\w+$/, '')  // Remove file extension
-            .replace(/([a-z])([A-Z])/g, '$1 $2')  // Add spaces between camelCase
-            .trim();
-        }
-      } catch (e) {
-        // Ignore errors in title extraction
-      }
-
-      const results: WebPageContent[] = [{
-        url,
-        title: pageTitle,
-        content: content.mainContent,
-        links: sortedLinks
-      }];
-
-      // Recursively fetch content for related links if not at max depth
-      if (currentDepth < maxDepth - 1) {
-        // Process links in parallel with a concurrency limit to improve speed
-        const pendingFetches = [];
+        const response = await axios.get(url, {
+          timeout: 10000,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+          }
+        });
         
-        for (const link of sortedLinks) {
-          const fullUrl = this.resolveUrl(link.url, url);
-          if (fullUrl && this.isSameDomain(fullUrl, url) && !this.visitedUrls.has(fullUrl)) {
-            pendingFetches.push(
-              this.fetchDocContentRecursive(
-                fullUrl,
-                maxDepth,
-                currentDepth + 1
-              )
-            );
-            
-            // Limit concurrent requests
-            if (pendingFetches.length >= 3) {
-              const fetchResults = await Promise.all(pendingFetches);
-              fetchResults.forEach(result => results.push(...result));
-              pendingFetches.length = 0;
+        // If we got HTML content, use it
+        if (response.status === 200 && response.data && typeof response.data === 'string') {
+          const mainContent = this.extractTextContent(response.data);
+          const links = this.extractLinks(response.data, url);
+          
+          // For depth=1, just return the main content
+          if (maxDepth <= 1) {
+            return {
+              rootUrl: url,
+              explorationDepth: maxDepth,
+              pagesExplored: 1,
+              content: [{
+                url,
+                content: mainContent,
+                links: links.slice(0, 10) // Limit to top 10 links
+              }]
+            };
+          }
+          
+          // For depth > 1, explore child links
+          const childResults = [];
+          const limit = Math.min(5, links.length); // Limit to 5 links for performance
+          
+          for (let i = 0; i < limit; i++) {
+            const link = links[i];
+            if (!this.visitedUrls.has(link.url)) {
+              try {
+                const childContent = await this.fetchSimpleContent(link.url);
+                if (childContent) {
+                  childResults.push({
+                    url: link.url,
+                    content: childContent,
+                    links: [] // Don't include links for child pages
+                  });
+                  this.visitedUrls.add(link.url);
+                }
+              } catch (e) {
+                // Ignore errors on child pages
+              }
             }
           }
+          
+          return {
+            rootUrl: url,
+            explorationDepth: maxDepth,
+            pagesExplored: 1 + childResults.length,
+            content: [{
+              url,
+              content: mainContent,
+              links: links.slice(0, 10)
+            }, ...childResults]
+          };
         }
-        
-        // Process any remaining fetches
-        if (pendingFetches.length > 0) {
-          const fetchResults = await Promise.all(pendingFetches);
-          fetchResults.forEach(result => results.push(...result));
-        }
+      } catch (e) {
+        // Fall back to puppeteer if axios fails
+        console.error('Axios fetch failed, falling back to puppeteer:', e);
       }
-
-      return results;
+      
+      // Fall back to puppeteer for more complex pages
+      return await this.fetchWithPuppeteer(url, maxDepth);
     } catch (error) {
-      console.error(`Error fetching ${url}:`, error);
-      return []; // Skip this URL on error but continue with others
+      console.error('Error in content fetch:', error);
+      // Return partial results if we have visited any URLs
+      if (this.visitedUrls.size > 0) {
+        return {
+          rootUrl: url,
+          explorationDepth: maxDepth,
+          pagesExplored: this.visitedUrls.size,
+          content: [],
+          error: error instanceof Error ? error.message : String(error)
+        };
+      }
+      throw error;
     }
   }
-
+  
   /**
-   * Fetch content from a single web page
+   * Simple content fetching for child pages
    */
-  private async fetchSinglePage(url: string): Promise<ExtractedContent> {
-    if (!this.browserManager.isValidUrl(url)) {
-      throw new McpError(ErrorCode.InvalidParams, 'Invalid URL provided');
-    }
-
-    console.error('Starting page fetch:', url);
-    let page = null;
-    let browser = null;
-
+  private async fetchSimpleContent(url: string): Promise<string | null> {
     try {
-      // Initialize browser with retry logic
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-          browser = await this.browserManager.initBrowser();
-          page = await browser.newPage();
-          break;
-        } catch (err) {
-          console.error(`Browser initialization attempt ${attempt} failed:`, err);
-          if (attempt === 3) throw err;
-          await new Promise(resolve => setTimeout(resolve, 1000));
+      const response = await axios.get(url, {
+        timeout: 5000,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
+      });
+      
+      if (response.status === 200 && response.data && typeof response.data === 'string') {
+        return this.extractTextContent(response.data);
       }
-
-      if (!page) {
-        throw new McpError(ErrorCode.InternalError, 'Failed to create browser page');
+      return null;
+    } catch (e) {
+      return null;
+    }
+  }
+  
+  /**
+   * Extract plain text content from HTML
+   */
+  private extractTextContent(html: string): string {
+    // Very basic HTML to text conversion
+    let text = html
+      .replace(/<head>[\s\S]*?<\/head>/i, '')
+      .replace(/<script[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[\s\S]*?<\/style>/gi, '')
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    
+    // Truncate if too long
+    if (text.length > 10000) {
+      text = text.substring(0, 10000) + '... (content truncated)';
+    }
+    
+    return text;
+  }
+  
+  /**
+   * Extract links from HTML
+   */
+  private extractLinks(html: string, baseUrl: string): Array<{url: string, text: string}> {
+    const links: Array<{url: string, text: string}> = [];
+    const linkRegex = /<a\s+(?:[^>]*?\s+)?href="([^"]*)"(?:\s+[^>]*?)?>([^<]*)<\/a>/gi;
+    
+    let match;
+    while ((match = linkRegex.exec(html)) !== null) {
+      const href = match[1].trim();
+      const text = match[2].trim();
+      
+      // Skip empty links or special protocols
+      if (!href || href.startsWith('#') || href.startsWith('javascript:') || 
+          href.startsWith('mailto:') || href.startsWith('tel:')) {
+        continue;
       }
-
-      // Set timeouts and configure page
-      await page.setDefaultNavigationTimeout(60000);
-      await page.setDefaultTimeout(60000);
-      await page.setViewport({ width: 1200, height: 800 });
+      
+      try {
+        // Resolve relative URLs
+        const fullUrl = new URL(href, baseUrl).href;
+        
+        // Only include links from same domain
+        if (new URL(fullUrl).hostname === new URL(baseUrl).hostname) {
+          links.push({
+            url: fullUrl,
+            text: text || fullUrl
+          });
+        }
+      } catch (e) {
+        // Skip invalid URLs
+      }
+    }
+    
+    return links;
+  }
+  
+  /**
+   * Fetch content using puppeteer for more complex pages
+   */
+  private async fetchWithPuppeteer(url: string, maxDepth: number): Promise<any> {
+    let browser = null;
+    
+    try {
+      // Launch browser with minimal options
+      browser = await puppeteer.launch({
+        headless: 'new',
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+      });
+      
+      const page = await browser.newPage();
+      await page.setDefaultNavigationTimeout(15000);
       await page.setRequestInterception(true);
-
-      // Handle request interception to block images, stylesheets, etc.
+      
+      // Block unnecessary resources
       page.on('request', (request) => {
         const resourceType = request.resourceType();
         if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
@@ -286,115 +349,151 @@ export class DocsFetchServer {
           request.continue();
         }
       });
-
-      // Navigate with retry logic
-      let response = null;
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-          response = await page.goto(url, {
-            waitUntil: ['domcontentloaded', 'networkidle0'],
-            timeout: 30000
-          });
-          break;
-        } catch (err) {
-          console.error(`Navigation attempt ${attempt} failed:`, err);
-          if (attempt === 3) throw err;
-          await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      // Navigate to the page
+      await page.goto(url, {
+        waitUntil: 'domcontentloaded',
+        timeout: 15000
+      });
+      
+      // Wait briefly for any scripts to run
+      await page.waitForTimeout(1000);
+      
+      // Extract content
+      const content = await page.evaluate(() => {
+        // Try to find main content
+        const selectors = [
+          '.markdown-body', '.readme', '.documentation', '[role="main"]',
+          'main', 'article', '.content', '#content', '.main-content', '#main-content',
+          '.docs-content', '.docs-body', '.docs-markdown', 'body'
+        ];
+        
+        let mainElement = null;
+        for (const selector of selectors) {
+          const elements = document.querySelectorAll(selector);
+          if (elements.length > 0) {
+            mainElement = elements[0];
+            break;
+          }
+        }
+        
+        // Fallback to body
+        mainElement = mainElement || document.body;
+        
+        // Get text content
+        const mainContent = mainElement ? mainElement.textContent || '' : '';
+        
+        // Extract links
+        const links = Array.from(document.querySelectorAll('a[href]'))
+          .map(link => {
+            const href = link.getAttribute('href');
+            const text = link.textContent || '';
+            
+            if (!href || href.startsWith('#') || href.startsWith('javascript:') || 
+                href.startsWith('mailto:') || href.startsWith('tel:')) {
+              return null;
+            }
+            
+            return {
+              url: href,
+              text: text.trim() || href
+            };
+          })
+          .filter(Boolean);
+        
+        return {
+          mainContent: mainContent.trim(),
+          links
+        };
+      });
+      
+      // Clean content
+      const mainContent = content.mainContent
+        .replace(/\s+/g, ' ')
+        .trim();
+      
+      // Truncate if too long
+      const truncatedContent = mainContent.length > 10000 
+        ? mainContent.substring(0, 10000) + '... (content truncated)'
+        : mainContent;
+      
+      // Resolve and filter links
+      const links = content.links
+        .map((link: any) => {
+          try {
+            const fullUrl = new URL(link.url, url).href;
+            return {
+              url: fullUrl,
+              text: link.text
+            };
+          } catch (e) {
+            return null;
+          }
+        })
+        .filter(Boolean)
+        .filter((link: any) => {
+          try {
+            return new URL(link.url).hostname === new URL(url).hostname;
+          } catch (e) {
+            return false;
+          }
+        });
+      
+      // For depth=1, just return the main content
+      if (maxDepth <= 1 || links.length === 0) {
+        return {
+          rootUrl: url,
+          explorationDepth: maxDepth,
+          pagesExplored: 1,
+          content: [{
+            url,
+            content: truncatedContent,
+            links: links.slice(0, 10) // Limit to top 10 links
+          }]
+        };
+      }
+      
+      // For depth > 1, explore a few child links
+      const childResults = [];
+      const limit = Math.min(3, links.length); // Strict limit to avoid timeouts
+      
+      for (let i = 0; i < limit; i++) {
+        const link = links[i];
+        if (link && !this.visitedUrls.has(link.url)) {
+          try {
+            const childContent = await this.fetchSimpleContent(link.url);
+            if (childContent) {
+              childResults.push({
+                url: link.url,
+                content: childContent,
+                links: [] // Don't include links for child pages
+              });
+              this.visitedUrls.add(link.url);
+            }
+          } catch (e) {
+            // Ignore errors on child pages
+          }
         }
       }
-
-      if (!response) {
-        throw new McpError(ErrorCode.InternalError, 'No response received');
-      }
-
-      const status = response.status();
-      if (status !== 200) {
-        throw new McpError(
-          ErrorCode.InternalError,
-          `Failed to load page: HTTP ${status}`
-        );
-      }
-
-      // Wait for content with timeout
-      const contentPromise = Promise.race([
-        this.contentExtractor.waitForContent(page),
-        new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Content wait timeout')), 30000)
-        )
-      ]);
-
-      try {
-        await contentPromise;
-      } catch (err) {
-        console.error('Content wait error:', err);
-      }
-
-      const hasContent = await this.contentExtractor.hasContent(page);
-      if (!hasContent) {
-        throw new McpError(ErrorCode.InternalError, 'Page appears to be empty');
-      }
-
-      const content = await this.contentExtractor.extractContent(page);
-      if (!content.mainContent || content.mainContent.trim().length === 0) {
-        throw new McpError(ErrorCode.InternalError, 'Failed to extract content');
-      }
-
-      return content;
-    } catch (error: unknown) {
-      console.error('Error in fetchSinglePage:', error);
-      if (error instanceof McpError) {
-        throw error;
-      }
-      throw new McpError(
-        ErrorCode.InternalError,
-        `Failed to fetch content: ${error instanceof Error ? error.message : String(error)}`
-      );
+      
+      return {
+        rootUrl: url,
+        explorationDepth: maxDepth,
+        pagesExplored: 1 + childResults.length,
+        content: [{
+          url,
+          content: truncatedContent,
+          links: links.slice(0, 10)
+        }, ...childResults]
+      };
+      
+    } catch (error) {
+      console.error('Puppeteer fetch error:', error);
+      throw error;
     } finally {
-      try {
-        if (page) await page.close();
-        if (browser) await browser.close();
-      } catch (err) {
-        console.error('Error during cleanup:', err);
+      if (browser) {
+        await browser.close();
       }
-    }
-  }
-
-  /**
-   * Resolve relative URLs to absolute URLs
-   */
-  private resolveUrl(href: string, base: string): string | null {
-    try {
-      // Handle absolute URLs
-      if (href.startsWith('http://') || href.startsWith('https://')) {
-        return href;
-      }
-      
-      // Skip non-HTTP links
-      if (href.startsWith('javascript:') || 
-          href.startsWith('mailto:') || 
-          href.startsWith('tel:') ||
-          href.startsWith('#')) {
-        return null;
-      }
-      
-      // Resolve relative URLs
-      return new URL(href, base).href;
-    } catch (e) {
-      console.error('Error resolving URL:', e);
-      return null;
-    }
-  }
-
-  /**
-   * Check if two URLs are from the same domain
-   */
-  private isSameDomain(url1: string, url2: string): boolean {
-    try {
-      const domain1 = new URL(url1).hostname;
-      const domain2 = new URL(url2).hostname;
-      return domain1 === domain2;
-    } catch (e) {
-      return false;
     }
   }
 
