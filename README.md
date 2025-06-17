@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/wolfyy970-docs-fetch-mcp-badge.png)](https://mseep.ai/app/wolfyy970-docs-fetch-mcp)
+
 # Docs Fetch MCP Server
 
 A Model Context Protocol (MCP) server for fetching web content with recursive exploration capabilities. This server enables LLMs to autonomously explore web pages and documentation to learn about specific topics.
