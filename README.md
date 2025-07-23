@@ -2,6 +2,10 @@
 
 A Model Context Protocol (MCP) server for fetching web content with recursive exploration capabilities. This server enables LLMs to autonomously explore web pages and documentation to learn about specific topics.
 
+<a href="https://glama.ai/mcp/servers/@wolfyy970/docs-fetch-mcp">
+  <img width="380" height="200" src="https://glama.ai/mcp/servers/@wolfyy970/docs-fetch-mcp/badge" alt="Docs Fetch Server MCP server" />
+</a>
+
 ## Overview
 
 The Docs Fetch MCP Server provides a simple but powerful way for LLMs to retrieve and explore web content. It enables:
