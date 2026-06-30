@@ -1,0 +1,16 @@
+export const CONTENT_SELECTORS = [
+  '.markdown-body',
+  '.readme',
+  '.documentation',
+  '[role="main"]',
+  'main',
+  'article',
+  '.content',
+  '#content',
+  '.main-content',
+  '#main-content',
+  '.docs-content',
+  '.docs-body',
+  '.docs-markdown',
+  'body',
+];

@@ -1,75 +1,65 @@
-import puppeteer, { Browser, PuppeteerLaunchOptions } from 'puppeteer';
-import { DEFAULT_BROWSER_CONFIG } from '../types/index.js';
+import puppeteer, { Browser } from 'puppeteer';
+import { BLOCKED_RESOURCE_TYPES, DEFAULT_BROWSER_CONFIG } from '../config/browser.js';
 
-/**
- * Manages browser instances and operations
- */
 export class BrowserManager {
   private browser: Browser | null = null;
 
-  /**
-   * Initialize a browser instance with default configuration
-   */
-  async initBrowser(): Promise<Browser> {
-    if (this.browser) {
-      return this.browser;
-    }
+  async renderHtml(url: string, timeoutMs: number): Promise<{ html: string; finalUrl: string; status: number }> {
+    const browser = await this.getBrowser();
+    const page = await browser.newPage();
 
     try {
-      console.error('Initializing browser...');
-      
-      // Check Puppeteer version and set appropriate headless option
-      let puppeteerVersion;
-      try {
-        puppeteerVersion = require('puppeteer/package.json').version;
-        console.error(`Puppeteer version: ${puppeteerVersion}`);
-      } catch (e) {
-        console.error('Could not determine Puppeteer version, using fallback options');
-      }
-      
-      // Configure browser options
-      const options: PuppeteerLaunchOptions = {
-        args: [...DEFAULT_BROWSER_CONFIG.args, '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      await page.setDefaultNavigationTimeout(timeoutMs);
+      await page.setRequestInterception(true);
+
+      page.on('request', (request) => {
+        if ((BLOCKED_RESOURCE_TYPES as readonly string[]).includes(request.resourceType())) {
+          void request.abort();
+          return;
+        }
+
+        void request.continue();
+      });
+
+      const response = await page.goto(url, {
+        waitUntil: 'domcontentloaded',
+        timeout: timeoutMs,
+      });
+
+      await page.waitForFunction(
+        () => Boolean(document.body && document.body.textContent && document.body.textContent.trim().length > 0),
+        { timeout: Math.min(2500, timeoutMs) }
+      ).catch(() => undefined);
+
+      return {
+        html: await page.content(),
+        finalUrl: page.url(),
+        status: response?.status() ?? 0,
       };
-      
-      // Handle headless mode based on Puppeteer version
-      if (puppeteerVersion && parseInt(puppeteerVersion.split('.')[0]) >= 19) {
-        // For Puppeteer v19+, use 'new' for headless mode
-        options.headless = DEFAULT_BROWSER_CONFIG.headless ? 'new' : false;
-      } else {
-        // For older versions, use boolean
-        options.headless = DEFAULT_BROWSER_CONFIG.headless;
-      }
-      
-      console.error('Launching browser with options:', options);
-      this.browser = await puppeteer.launch(options);
-      console.error('Browser launched successfully');
-      return this.browser;
-    } catch (error) {
-      console.error('Browser initialization error:', error);
-      throw error;
+    } finally {
+      await page.close().catch(() => undefined);
     }
   }
 
-  /**
-   * Check if a URL is valid
-   */
-  isValidUrl(url: string): boolean {
-    try {
-      new URL(url);
-      return true;
-    } catch (e) {
-      return false;
-    }
-  }
-
-  /**
-   * Close the browser instance
-   */
   async close(): Promise<void> {
-    if (this.browser) {
-      await this.browser.close();
-      this.browser = null;
+    if (!this.browser) {
+      return;
     }
+
+    await this.browser.close();
+    this.browser = null;
+  }
+
+  private async getBrowser(): Promise<Browser> {
+    if (this.browser) {
+      return this.browser;
+    }
+
+    this.browser = await puppeteer.launch({
+      headless: DEFAULT_BROWSER_CONFIG.headless ? 'new' : false,
+      args: DEFAULT_BROWSER_CONFIG.args,
+    });
+
+    return this.browser;
   }
 }

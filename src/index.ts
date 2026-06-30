@@ -1,16 +1,16 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 import { DocsFetchServer } from './server.js';
 
 /**
  * Docs Fetch MCP Server
  * 
- * This server provides a simple way to fetch web page content with the ability to 
- * explore linked pages up to a specified depth. It returns the main content of 
- * the page along with links that can be further explored.
+ * This server fetches documentation content and can perform a bounded crawl of
+ * same-origin links. It returns Markdown content, ranked links, crawl metadata,
+ * and per-page errors.
  * 
  * Available tool:
- * - fetch_doc_content: Fetch web page content with links, allowing for 
- *   recursive exploration of same-domain pages up to the specified depth.
+ * - fetch_doc_content: Fetch a page or crawl linked pages up to the requested
+ *   depth and page/time limits.
  */
 
 const server = new DocsFetchServer();

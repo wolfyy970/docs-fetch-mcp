@@ -1,119 +1,80 @@
-import { Page } from 'puppeteer';
-import { CONTENT_SELECTORS } from '../types/index.js';
-import { ExtractedContent } from '../types/index.js';
+import * as cheerio from 'cheerio';
+import { ExtractedPage } from '../types/index.js';
+import { normalizeUrl } from '../utils/url.js';
+import { extractLinks } from './link-extractor.js';
+import { selectMainElement } from './main-content-selector.js';
+import { renderMarkdown } from './markdown-renderer.js';
+import { cleanText } from './text-cleanup.js';
 
-/**
- * Extracts and processes content from web pages
- */
+interface ExtractContentOptions {
+  sourceUrl: string;
+  finalUrl?: string;
+  status: number;
+  contentLimit: number;
+  fetchedWith: 'http' | 'browser';
+}
+
 export class ContentExtractor {
-  /**
-   * Wait for content to be available on the page
-   */
-  async waitForContent(page: Page): Promise<void> {
-    await page.waitForFunction(() => {
-      return document.body && document.body.textContent && document.body.textContent.length > 0;
-    });
+  extractFromHtml(html: string, options: ExtractContentOptions): ExtractedPage {
+    const $ = cheerio.load(html);
+    const finalUrl = options.finalUrl ?? options.sourceUrl;
+
+    $('script, style, noscript, svg, canvas, iframe, form').remove();
+
+    const title = cleanText($('title').first().text()) || cleanText($('h1').first().text());
+    const description = cleanText($('meta[name="description"]').attr('content') ?? '');
+    const canonicalHref = $('link[rel="canonical"]').attr('href');
+    const canonicalUrl = canonicalHref ? normalizeUrl(canonicalHref, finalUrl) ?? undefined : undefined;
+
+    const main = selectMainElement($);
+    const headings = main
+      .find('h1, h2, h3')
+      .map((_, element) => cleanText($(element).text()))
+      .get()
+      .filter(Boolean)
+      .slice(0, 30);
+
+    const markdown = renderMarkdown($, main);
+    const contentLength = markdown.length;
+    const truncated = contentLength > options.contentLimit;
+    const content = truncated
+      ? `${markdown.slice(0, options.contentLimit).trim()}\n\n... (content truncated)`
+      : markdown;
+
+    return {
+      url: options.sourceUrl,
+      finalUrl,
+      status: options.status,
+      title: title || finalUrl,
+      description: description || undefined,
+      canonicalUrl,
+      headings,
+      content,
+      contentLength,
+      truncated,
+      links: extractLinks($, finalUrl, main),
+      fetchedWith: options.fetchedWith,
+    };
   }
 
-  /**
-   * Check if page has meaningful content
-   */
-  async hasContent(page: Page): Promise<boolean> {
-    return await page.evaluate(() => {
-      return Boolean(document.body && document.body.textContent && document.body.textContent.trim().length > 100);
-    });
-  }
+  extractFromText(text: string, options: ExtractContentOptions): ExtractedPage {
+    const cleaned = cleanText(text);
+    const truncated = cleaned.length > options.contentLimit;
+    const content = truncated
+      ? `${cleaned.slice(0, options.contentLimit).trim()}\n\n... (content truncated)`
+      : cleaned;
 
-  /**
-   * Extract the main content and links from a page
-   */
-  async extractContent(page: Page): Promise<ExtractedContent> {
-    const content = await page.evaluate((selectors) => {
-      // Helper function to clean text inside the evaluate context
-      function cleanText(text: string): string {
-        return text
-          .replace(/\s+/g, ' ')
-          .replace(/\n\s*\n/g, '\n\n')
-          .trim();
-      }
-      
-      // Try all selectors until we find content
-      let mainElement = null;
-      for (const selector of selectors) {
-        const elements = Array.from(document.querySelectorAll(selector));
-        if (elements.length > 0) {
-          // If multiple elements match, find the one with the most text
-          mainElement = elements.reduce((longest, current) => {
-            return (current.textContent?.length || 0) > (longest.textContent?.length || 0) ? current : longest;
-          }, elements[0]);
-          
-          if (mainElement.textContent && mainElement.textContent.trim().length > 200) {
-            break;
-          }
-        }
-      }
-
-      // Fallback to body if no content found
-      mainElement = mainElement || document.body;
-
-      // Extract the main content text
-      const mainContent = mainElement ? cleanText(mainElement.textContent || '') : '';
-
-      // Extract links with relevance score
-      const relatedLinks = Array.from(document.querySelectorAll('a[href]'))
-        .map(link => {
-          const href = link.getAttribute('href');
-          const text = link.textContent || '';
-          
-          if (!href || href.startsWith('#') || href.startsWith('javascript:') || 
-              href.startsWith('mailto:') || href.startsWith('tel:')) {
-            return null;
-          }
-          
-          // Calculate relevance score based on various factors
-          let relevance = 0;
-          
-          // Text length (longer text = more informative)
-          relevance += Math.min(text.length / 10, 5);
-          
-          // Link appears in the main content area
-          if (mainElement?.contains(link)) {
-            relevance += 5;
-          }
-          
-          // Link text hints at being informative content
-          const informativeWords = ['guide', 'docs', 'tutorial', 'reference', 'example', 'api', 'learn', 'how to'];
-          for (const word of informativeWords) {
-            if (text.toLowerCase().includes(word)) {
-              relevance += 2;
-            }
-          }
-          
-          return {
-            url: href,
-            text: text.trim(),
-            relevance
-          };
-        })
-        .filter(Boolean); // Remove null entries
-
-      return {
-        mainContent,
-        relatedLinks
-      };
-    }, CONTENT_SELECTORS);
-
-    return content as ExtractedContent;
-  }
-
-  /**
-   * Clean text by removing excessive whitespace
-   * @private
-   */
-  private cleanText(text: string): string {
-    return text
-      .replace(/\s+/g, ' ')
-      .replace(/\n\s*\n/g, '\n\n')
-      .trim();
+    return {
+      url: options.sourceUrl,
+      finalUrl: options.finalUrl ?? options.sourceUrl,
+      status: options.status,
+      title: options.finalUrl ?? options.sourceUrl,
+      headings: [],
+      content,
+      contentLength: cleaned.length,
+      truncated,
+      links: [],
+      fetchedWith: options.fetchedWith,
+    };
   }
 }
